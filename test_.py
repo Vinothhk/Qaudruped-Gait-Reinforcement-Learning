@@ -4,11 +4,11 @@ from stable_baselines3 import PPO  # Change this if you used a different algorit
 from custom_env import QuadrupedEnv  # Import your custom environment
 
 # Load the trained model
-model_path = "/home/vinoth/rl_project/quadruped_rl/models/best_model.zip"  # Update with your actual model path
+model_path = "/home/vinoth/rl_project/quadruped_rl/models/spot.zip"  # Update with your actual model path
 model = PPO.load(model_path)
 
 # Create the environment
-env = QuadrupedEnv("/home/vinoth/rl_project/boston_dynamics_spot/scene.xml")  # Update with your model XML
+env = QuadrupedEnv("quadruped_rl/boston_dynamics_spot/scene.xml")  # Update with your model XML
 obs = env.reset()
 
 # Run the trained model in the environment

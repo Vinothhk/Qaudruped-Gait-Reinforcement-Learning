@@ -21,7 +21,7 @@ class QuadrupedEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(self.model.nq + self.model.nv + 12,), dtype=np.float32
         )
-
+        self.last_action = np.zeros(self.action_space.shape)
         # Initialize rendering
         self.window = None
         self.context = None
@@ -47,7 +47,7 @@ class QuadrupedEnv(gym.Env):
 
         # Step the simulation
         mujoco.mj_step(self.model, self.data)
-
+        self.last_action = action.copy()
         # Get observation, reward, and done flag
         obs = self._get_obs()
         reward = self._get_reward()
@@ -96,13 +96,15 @@ class QuadrupedEnv(gym.Env):
         desired_height = 0.75  # Initial height
         height_error = abs(body_height - desired_height)
 
-        stability_reward = -0.1 * orientation_error - 0.1 * height_error
+        # stability_reward = -0.1 * orientation_error - 0.1 * height_error  //Old reward function
+        stability_reward = - orientation_error - height_error
 
         # Gait efficiency
         current_foot_positions = self._get_foot_positions()
         foot_movement = np.linalg.norm(current_foot_positions - self.last_foot_positions)
         self.last_foot_positions = current_foot_positions
-        gait_reward = 0.1 * foot_movement
+        # gait_reward = 0.1 * foot_movement
+        gait_reward = 1.5 * foot_movement # Reward for moving legs
 
         # Forward velocity
         forward_velocity = self.data.qvel[0]  # X-axis velocity
@@ -115,7 +117,7 @@ class QuadrupedEnv(gym.Env):
         # Total reward
         reward = stability_reward + gait_reward + velocity_reward + energy_penalty
         return reward
-
+      
     def _get_done(self):
         # Termination conditions:
         # 1. Robot falls (body height too low)

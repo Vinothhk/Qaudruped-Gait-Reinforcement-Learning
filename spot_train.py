@@ -1,7 +1,7 @@
 from huggingface_hub import EvalResult
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback,EvalCallback,CallbackList
-from custom_env import QuadrupedEnv
+from spot_env import QuadrupedEnv
 
 # Custom callback for rendering and episode tracking
 class RenderAndEpisodeCallback(BaseCallback):
@@ -54,4 +54,4 @@ cb_list = ([eval_callback,callback])
 model.learn(total_timesteps=total_timesteps, progress_bar=True,callback=cb_list)
 
 # Save the model
-model.save("models/final_quadruped_ppo")
+model.save("models/spot_ppo")
