@@ -54,11 +54,23 @@ python3 test_v2.py
 - `test_v2.py`: Script for testing the trained model.
 - `.gitignore`: Specifies files and directories to ignore in version control.
 
+## Displaying Simulation Video
+
+You can visualize the robot's performance in TRAINING by watching the simulation video stored in the `media` folder.
+
+### Example Video
+
+Below is a sample video of the quadruped robot's gait simulation:
+
+![Simulation Video](media/training.mp4)
+
+
 ## Future Work
 
 - Add more complex reward functions for advanced gaits.
 - Implement domain randomization for robustness.
 - Extend to uneven terrain simulations.
+
 
 <!-- ## License
 
