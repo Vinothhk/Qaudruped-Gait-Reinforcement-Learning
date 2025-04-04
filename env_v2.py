@@ -20,9 +20,18 @@ class QuadrupedEnv(gym.Env):
         # self.observation_space = spaces.Box(
         #     low=-np.inf, high=np.inf, shape=(self.model.nq + self.model.nv + 12 + 4,), dtype=np.float32
         # )
-        observation_size = self.model.nq + self.model.nv + 20  # nq + nv + 4 (quaternion) + 12 (foot positions) + 4 (contact states)
+        self.foot_geom_ids = self._get_leg_geom_ids()
+        self.leg_phases = np.array([0, np.pi, np.pi, 0])  # Trot gait
+        self.prev_contact_states = np.zeros(4)
+        self.contact_forces = np.zeros(4)
+        self.swing_states = np.zeros(4, dtype=bool)
+        
+        # Update observation space size
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(observation_size,), dtype=np.float32
+            low=-np.inf, 
+            high=np.inf, 
+            shape=(self.model.nq + self.model.nv + 3 + 3 + 3 + 12 + 12 + 4 + 4 + 2 + 4,),
+            dtype=np.float32
         )
 
         # Initialize rendering
@@ -43,22 +52,90 @@ class QuadrupedEnv(gym.Env):
 
 
     def reset(self):
-        # Reset the simulation to the initial state
         mujoco.mj_resetData(self.model, self.data)
+        self._add_noise_to_reset()
         self.time = 0
-        self.last_foot_positions = self._get_foot_positions()
+        self.leg_phases = np.array([0, np.pi, np.pi, 0])  # Reset phases
+        self.prev_contact_states = np.zeros(4)
+        self.contact_forces = np.zeros(4)
         return self._get_obs()
 
+    def _get_obs(self):
+        """Replace with this new version"""
+        qpos = self.data.qpos.copy()
+        qvel = self.data.qvel.copy()
+        
+        # Body info
+        _, euler_angles = self._get_body_orientation()
+        body_lin_vel = self.data.qvel[:3]
+        body_ang_vel = self.data.qvel[3:6]
+        
+        # Foot info
+        foot_positions = self._get_foot_positions().flatten()
+        foot_velocities = self._get_foot_velocities().flatten()
+        contact_states = self._get_contact_states()
+        contact_forces = self._get_foot_contacts_force()
+        
+        # Gait info
+        cop = self._get_center_of_pressure()
+        phases = self.leg_phases.copy()
+        
+        return np.concatenate([
+            qpos, qvel,
+            euler_angles,
+            body_lin_vel,
+            body_ang_vel,
+            foot_positions,
+            foot_velocities,
+            contact_states,
+            contact_forces,
+            cop,
+            phases
+        ])
+
+    # def step(self, action):
+    #     """Replace with this version"""
+    #     # Apply action
+    #     self.data.ctrl[:] = action
+        
+    #     # Update foot targets
+    #     foot_targets = self._get_phase_based_foot_targets(self.time)
+    #     for i in range(4):
+    #         self._set_foot_target(i, foot_targets[i])
+        
+    #     # Step simulation
+    #     mujoco.mj_step(self.model, self.data)
+        
+    #     # Update contact info
+    #     self.prev_contact_states = self._get_contact_states()
+    #     self.contact_forces = self._get_foot_contacts_force()
+    #     self.swing_states = self._get_leg_swing_states()
+    #     self._update_gait_phases()
+        
+    #     # Return step data
+    #     obs = self._get_obs()
+    #     reward = self._get_reward()
+    #     done = self._get_done()
+    #     info = {
+    #         'contacts': self.prev_contact_states.copy(),
+    #         'phases': self.leg_phases.copy()
+    #     }
+        
+    #     self.time += self.model.opt.timestep
+    #     return obs, reward, done, info
     def step(self, action):
         # Apply control action
-        self.data.ctrl[:] = action
-
-        # Apply gait pattern
-        self._apply_gait()
-
-        # Step the simulation
+        foot_targets = self._get_phase_based_foot_targets(self.time)
+    
+        # 2. Let policy modify targets (residual learning)
+        foot_targets += 0.1 * action.reshape(4, 3)  # Small, learnable adjustments
+        
+        # 3. Apply IK control
+        for i in range(4):
+            self._set_foot_target(i, foot_targets[i])
+        
+        # 4. Step physics
         mujoco.mj_step(self.model, self.data)
-
         # Get observation, reward, and done flag
         obs = self._get_obs()
         reward = self._get_reward()
@@ -69,22 +146,7 @@ class QuadrupedEnv(gym.Env):
         self.time += self.model.opt.timestep
 
         return obs, reward, done, info
-
-    def _get_obs(self):
-        # Observation includes:
-        # - Joint positions (qpos)
-        # - Joint velocities (qvel)
-        # - Body orientation (quaternion)
-        # - Foot positions (relative to body)
-        # - Contact states (binary)
-        qpos = self.data.qpos
-        qvel = self.data.qvel
-        body_orientation = self.data.qpos[3:7]  # Quaternion
-        # foot_positions = self._get_foot_positions()
-        foot_positions = self._get_foot_positions().flatten()
-        contact_states = self._get_contact_states()
-        return np.concatenate([qpos, qvel, body_orientation, foot_positions, contact_states])
-
+    
     def _get_foot_positions(self):
         # Get the positions of all four feet relative to the body
         foot_positions = []
@@ -157,12 +219,12 @@ class QuadrupedEnv(gym.Env):
         sliding_penalty = self._get_sliding_penalty()
 
         ##new rewards 
-        foot_clearance_reward = self._get_foot_clearance_reward()
-        gait_sync_reward = self._get_gait_sync_reward()
-        # smoothness_penalty = self._get_smoothness_penalty()
-        directionality_penalty = self._get_directionality_penalty()
+        # foot_clearance_reward = self._get_foot_clearance_reward()
+        # gait_sync_reward = self._get_gait_sync_reward()
+        # # smoothness_penalty = self._get_smoothness_penalty()
+        # directionality_penalty = self._get_directionality_penalty()
         # Total reward
-        reward = stability_reward + gait_reward + velocity_reward + energy_penalty + sliding_penalty+ foot_clearance_reward + gait_sync_reward + directionality_penalty
+        reward = stability_reward + gait_reward + velocity_reward + energy_penalty + sliding_penalty
         
         # print(f"Stability: {stability_reward}, Gait: {gait_reward}, Velocity: {velocity_reward}, "
         # f"Energy: {energy_penalty}, Sliding: {sliding_penalty}, Clearance: {foot_clearance_reward}, "
@@ -180,18 +242,18 @@ class QuadrupedEnv(gym.Env):
         desired_height = 0.52 #0.75 Old Desired height - Qpos - 2 : 0.46
         height_error = abs(body_height - desired_height)
 
-        orientation_reward = -orientation_error / 10.0  # Scale down
-        height_reward = -height_error / 0.1  # Scale down
+        # orientation_reward = -orientation_error / 10.0  # Scale down
+        # height_reward = -height_error / 0.1  # Scale down
 
-        return orientation_reward + height_reward
+        # return orientation_reward + height_reward
 
-        # return -orientation_error - height_error
+        return -orientation_error - height_error
 
     def _get_gait_efficiency_reward(self):
         current_foot_positions = self._get_foot_positions()
         foot_movement = np.linalg.norm(current_foot_positions - self.last_foot_positions)
         self.last_foot_positions = current_foot_positions
-        return 1 * foot_movement
+        return 1.5 * foot_movement
 
     def _get_velocity_reward(self):
         forward_velocity = self.data.qvel[0]  # X-axis velocity
@@ -199,7 +261,7 @@ class QuadrupedEnv(gym.Env):
 
     def _get_energy_penalty(self):
         joint_torques = np.abs(self.data.ctrl).sum()
-        return -0.001 * joint_torques
+        return -0.05 * joint_torques
 
     # def _get_sliding_penalty(self):
     #     foot_velocities = self._get_foot_velocities()
@@ -216,7 +278,7 @@ class QuadrupedEnv(gym.Env):
         # Only penalize sliding when foot is in contact
         sliding_penalty = np.sum(sliding_speeds * foot_contacts)
         
-        return -0.1 * sliding_penalty  # Negative because we want to minimize sliding
+        return -sliding_penalty  # Negative because we want to minimize sliding
 
     # def _get_foot_velocities(self):
     #     # Get the velocities of all four feet
@@ -289,7 +351,7 @@ class QuadrupedEnv(gym.Env):
         phase_offsets = [0, np.pi, np.pi, 0]  # Example for trot gait
         current_phases = self._get_foot_phases()  # Compute foot phases
         phase_errors = np.abs(current_phases - phase_offsets)
-        return -np.sum(phase_errors)  # Penalize deviations from desired phases
+        return -0.01 * np.sum(phase_errors)  # Penalize deviations from desired phases
 
     def _get_foot_phases(self):
         """
@@ -399,61 +461,69 @@ class QuadrupedEnv(gym.Env):
         return self.model.key_qpos[7:]  # Skip free joint (pos+quat)
     
     def _leg_ik(self, leg_index, foot_target):
-        """
-        Simple inverse kinematics for a single leg.
-        Returns target joint angles for the given foot position (relative to hip).
-        """
-        # Leg geometry parameters from your XML
+        """Robust inverse kinematics with numerical safeguards"""
+        # Leg lengths from your XML
         L1 = 0.1108  # Upper leg length (hip to knee)
         L2 = 0.32    # Lower leg length (knee to foot)
         
-        # Convert foot target to leg coordinate system
         x, y, z = foot_target
         
-        # Hip abduction/adduction (hx joint)
-        hx_angle = np.arctan2(y, z)
+        # 1. Hip abduction (sideways movement)
+        hx_angle = np.arctan2(y, np.sqrt(x**2 + z**2 + 1e-10))  # Add small epsilon
         
-        # Distance from hip to foot in sagittal plane
-        d = np.sqrt(x**2 + z**2 - y**2)
+        # 2. Calculate distance with numerical safeguards
+        d_squared = x**2 + z**2 - y**2
+        d_squared = max(d_squared, 0)  # Ensure non-negative
+        d = np.sqrt(d_squared)
         
-        # Knee angle (kn joint) - simple geometric solution
+        # 3. Knee angle with cosine clipping
         cos_kn = (L1**2 + L2**2 - d**2) / (2 * L1 * L2)
-        cos_kn = np.clip(cos_kn, -1, 1)  # Avoid numerical errors
-        kn_angle = np.pi - np.arccos(cos_kn)
+        cos_kn = np.clip(cos_kn, -1, 1)  # Strict clipping
         
-        # Hip flexion/extension (hy joint)
-        hy_angle = np.arctan2(x, z) + np.arcsin(L1 * np.sin(np.pi - kn_angle) / d)
+        # Handle edge cases where leg is fully extended
+        if abs(cos_kn - 1) < 1e-6:
+            kn_angle = 0
+        elif abs(cos_kn + 1) < 1e-6:
+            kn_angle = np.pi
+        else:
+            kn_angle = np.pi - np.arccos(cos_kn)
+        
+        # 4. Hip flexion with fallback for singularities
+        try:
+            hy_angle = np.arctan2(x, z) + np.arcsin(L1 * np.sin(np.pi - kn_angle) / (d + 1e-10))
+        except:
+            hy_angle = np.arctan2(x, z)  # Fallback
         
         return np.array([hx_angle, hy_angle, kn_angle])
     
     def _set_foot_target(self, leg_index, foot_target):
-        """Sets joint angles to reach target foot position (relative to body)"""
-        # Get hip position in world frame
-        hip_pos = self._get_hip_positions()[leg_index]
-        body_pos = self.data.qpos[0:3]
+        # """Sets joint angles to reach target foot position (relative to body)"""
+        # # Get hip position in world frame
+        # hip_pos = self._get_hip_positions()[leg_index]
+        # body_pos = self.data.qpos[0:3]
         
-        # Convert to hip-relative coordinates
-        hip_rel_target = foot_target - (hip_pos - body_pos)
+        # # Convert to hip-relative coordinates
+        # hip_rel_target = foot_target - (hip_pos - body_pos)
+        pass
+        # # Compute IK
+        # target_angles = self._leg_ik(leg_index, hip_rel_target)
         
-        # Compute IK
-        target_angles = self._leg_ik(leg_index, hip_rel_target)
+        # # Get joint indices for this leg
+        # joint_indices = self._get_leg_joint_indices(leg_index)
         
-        # Get joint indices for this leg
-        joint_indices = self._get_leg_joint_indices(leg_index)
-        
-        # Apply with PD control
-        kp = 0.5
-        kd = 0.05
-        for i, j in enumerate(joint_indices):
-            error = target_angles[i] - self.data.qpos[7 + j]  # 7 = free joint dims
-            self.data.ctrl[j] = kp * error - kd * self.data.qvel[6 + j]  # 6 = free joint vel dims
+        # # Apply with PD control
+        # kp = 0.5
+        # kd = 0.05
+        # for i, j in enumerate(joint_indices):
+        #     error = target_angles[i] - self.data.qpos[7 + j]  # 7 = free joint dims
+        #     self.data.ctrl[j] = kp * error - kd * self.data.qvel[6 + j]  # 6 = free joint vel dims
     
     def _get_hip_positions(self):
-        """Returns positions of all hip joints in world frame"""
+        """Returns world-frame positions of all hip joints (updated for current MuJoCo API)"""
         hip_positions = []
         for hip_name in ["fl_hip", "fr_hip", "hl_hip", "hr_hip"]:
             hip_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, hip_name)
-            hip_positions.append(self.data.xpos[hip_id])
+            hip_positions.append(self.data.xpos[hip_id])  # Changed from body_xpos to xpos
         return np.array(hip_positions)
     
     def _get_body_orientation(self):
@@ -493,26 +563,30 @@ class QuadrupedEnv(gym.Env):
         return grf
     
     def _add_noise_to_reset(self):
-        """Adds small random perturbations to initial state"""
-        # Randomize joint positions slightly
-        noise_scale = 0.1  # Radians
+        """Simplified version using only numpy"""
+        # Joint and position noise (same as before)
+        noise_scale = 0.1
         self.data.qpos[7:] += noise_scale * np.random.randn(self.model.nq - 7)
+        self.data.qpos[:2] += 0.05 * np.random.randn(2)
+        self.data.qpos[2] += 0.01 * np.random.randn()
         
-        # Randomize body position slightly
-        self.data.qpos[:2] += 0.05 * np.random.randn(2)  # XY position
-        self.data.qpos[2] += 0.01 * np.random.randn()    # Z position
+        # Orientation noise - small random axis-angle perturbation
+        axis = np.random.randn(3)
+        axis /= np.linalg.norm(axis)
+        angle = 0.05 * np.random.randn()
+        noise_quat = np.zeros(4)
+        noise_quat[0] = np.cos(angle/2)  # w
+        noise_quat[1:] = np.sin(angle/2) * axis  # x,y,z
         
-        # Randomize orientation slightly (roll/pitch/yaw)
-        euler_noise = 0.05 * np.random.randn(3)
-        quat_noise = Rotation.from_euler('xyz', euler_noise).as_quat()
+        # Combine with original quaternion (MuJoCo quat multiplication)
         original_quat = self.data.qpos[3:7]
-        self.data.qpos[3:7] = Rotation.from_quat(
-            original_quat[[1, 2, 3, 0]]  # MuJoCo to scipy
-        ).apply(Rotation.from_quat(quat_noise)).as_quat()[[3, 0, 1, 2]]  # Back to MuJoCo
+        w = original_quat[0]*noise_quat[0] - np.dot(original_quat[1:], noise_quat[1:])
+        xyz = original_quat[0]*noise_quat[1:] + noise_quat[0]*original_quat[1:] + np.cross(original_quat[1:], noise_quat[1:])
+        self.data.qpos[3:7] = np.array([w, *xyz])
         
-        # Randomize velocities slightly
+        # Velocity noise
         self.data.qvel[:] += 0.01 * np.random.randn(self.model.nv)
-    
+
     def _get_phase_based_foot_targets(self, time):
         """Returns foot targets for all legs based on gait phase"""
         targets = []
@@ -531,9 +605,27 @@ class QuadrupedEnv(gym.Env):
         return phase
     
     def _get_leg_swing_states(self):
-        """Returns boolean array indicating which legs are in swing phase"""
-        foot_contacts = self._get_contact_states()
-        return ~foot_contacts  # Swing = not in contact
+        """Returns boolean array indicating which legs are in swing phase (not in contact)"""
+        contact_states = np.zeros(4, dtype=bool)
+        
+        # Get all foot geom IDs
+        foot_geom_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name) 
+                        for name in ["FL", "FR", "HL", "HR"]]
+        
+        # Check contacts for each foot
+        for i, geom_id in enumerate(foot_geom_ids):
+            # Check if geom exists
+            if geom_id == -1:
+                continue
+                
+            # Check all active contacts
+            for contact_idx in range(self.data.ncon):
+                contact = self.data.contact[contact_idx]
+                if contact.geom1 == geom_id or contact.geom2 == geom_id:
+                    contact_states[i] = True
+                    break
+        
+        return ~contact_states  # Return swing states (opposite of contact states)
     
     def _get_center_of_pressure(self):
         """Calculates center of pressure from ground reaction forces"""
@@ -556,3 +648,29 @@ class QuadrupedEnv(gym.Env):
         cop_y = np.sum(foot_positions[:, 1] * normal_forces * contact_states) / total_force
         
         return np.array([cop_x, cop_y])
+    
+    def _get_body_orientation(self):
+        """Returns body orientation as Euler angles"""
+        quat = self.data.qpos[3:7]
+        rot = Rotation.from_quat(quat[[1, 2, 3, 0]])  # MuJoCo to scipy convention
+        return rot.as_matrix(), rot.as_euler('xyz')
+
+    def _get_foot_contacts_force(self):
+        """Returns normal contact forces for all feet"""
+        forces = np.zeros(4)
+        for i, geom_id in enumerate(self.foot_geom_ids):
+            for contact in self.data.contact:
+                if contact.geom1 == geom_id or contact.geom2 == geom_id:
+                    force = np.zeros(6)
+                    mujoco.mj_contactForce(self.model, self.data, 0, force)
+                    forces[i] = force[0]  # Normal force
+                    break
+        return forces
+
+    def _update_gait_phases(self):
+        """Updates leg phases based on contact events"""
+        for i in range(4):
+            if not self.prev_contact_states[i] and self._get_contact_states()[i]:
+                self.leg_phases[i] = 0  # Reset phase on new contact
+            self.leg_phases[i] += 2*np.pi*self.model.opt.timestep/self.gait_period
+            self.leg_phases[i] %= 2*np.pi
