@@ -62,7 +62,7 @@ You can visualize the robot's performance in TRAINING by watching the simulation
 
 Below is a sample video of the quadruped robot's gait simulation:
 
-![Simulation Video](media/training.mp4)
+![Simulation Video](media/training.gif)
 
 
 ## Future Work
